@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+############################################
+usage() {
+    echo "Usage:"
+    echo "  nanocargo_polish [-h] -i <input.fa> -f <reads.fastq> -o <output_dir> [options]"
+    echo "  Use -h for detailed information on all options"
+    exit 1
+}
+
+help() {
+    echo "Usage:"
+    echo "  nanocargo_polish -i <input.fa> -f <reads.fastq> -o <output_dir> [-t threads]"
+    echo "                   [-r rounds] [-m medaka_model] [--keep-intermediate]"
+    echo ""
+    echo "Required arguments:"
+    echo "  -i    Input representative sequence FASTA file"
+    echo "  -f    Input FASTQ file for Racon and optional Medaka polishing"
+    echo "  -o    Output directory"
+    echo ""
+    echo "Optional arguments:"
+    echo "  -t INT              Number of threads (default: 16)"
+    echo "  -r INT              Number of Racon polishing rounds (default: 3)"
+    echo "  -m MODEL            Medaka model. Medaka polishing runs only if a model is provided (default: none)"
+    echo "  --keep-intermediate Keep intermediate files generated during polishing (default: false)"
+    echo "  -h                  Show this help message"
+    echo ""
+    exit 0
+}
+############################################
+
+# -----------------------------
+# Default parameters
+# -----------------------------
+THREADS=16
+ROUNDS=3
+MEDAKA_MODEL=""
+KEEP_INTERMEDIATE=false
+
+# -----------------------------
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+# Parse arguments
+# -----------------------------
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -i) INPUT_REF="$2"; shift 2 ;;
+        -f) READS_FASTQ="$2"; shift 2 ;;
+        -o) OUTDIR="$2"; shift 2 ;;
+        -t) THREADS="$2"; shift 2 ;;
+        -r) ROUNDS="$2"; shift 2 ;;
+        -m) MEDAKA_MODEL="$2"; shift 2 ;;
+        --keep-intermediate) KEEP_INTERMEDIATE=true; shift ;;
+        -h|--help) help ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# -----------------------------
+# Check required arguments
+# -----------------------------
+if [[ -z "${INPUT_REF:-}" || -z "${READS_FASTQ:-}" || -z "${OUTDIR:-}" ]]; then
+    echo "Error: -i, -f, and -o are required"
+    usage
+    exit 1
+fi
+
+# -----------------------------
+# Prepare paths
+# -----------------------------
+INPUT_REF=$(realpath "$INPUT_REF")
+READS_FASTQ=$(realpath "$READS_FASTQ")
+OUTDIR=$(realpath -m "$OUTDIR")
+if [[ -d "$OUTDIR" && "$(ls -A "$OUTDIR")" ]]; then
+    echo "ERROR: Output directory is not empty:"
+    echo "  $OUTDIR"
+    echo "Please provide an empty directory or remove existing files."
+    exit 1
+fi
+mkdir -p "$OUTDIR"
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+CONFIG="$SCRIPT_DIR/config.yaml"
+
+if [[ ! -f "$CONFIG" ]]; then
+    echo "Error: config file not found: $CONFIG"
+    exit 1
+fi
+
+echo "Input reference: $INPUT_REF"
+echo "Reads file: $READS_FASTQ"
+echo "Output directory: $OUTDIR"
+echo "Threads: $THREADS"
+echo "Racon rounds: $ROUNDS"
+echo "Medaka model: ${MEDAKA_MODEL:-none}"
+echo "Keep intermediate files: $KEEP_INTERMEDIATE"
+
+# -----------------------------
+# Check dependencies
+# -----------------------------
+for cmd in minimap2 racon awk seqkit python3; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "Error: Required program '$cmd' not found in PATH."
+        exit 1
+    fi
+done
+
+if [[ -n "$MEDAKA_MODEL" ]]; then
+    if ! command -v medaka_consensus &>/dev/null; then
+        echo "Error: medaka_consensus not found in PATH."
+        exit 1
+    fi
+fi
+
+# -----------------------------
+# Racon polishing
+# -----------------------------
+INPUT_RACON="$OUTDIR/input_racon.fa"
+echo "Preparing input reference for Racon polishing..."
+
+# Sort by length descending and rename sequences
+seqkit sort -l -r "$INPUT_REF" | seqkit replace -p '.*' -r 'rep{nr}' -o "$INPUT_RACON"
+echo "Sorted and renamed reference written to: $INPUT_RACON"
+
+# Use this as the initial reference for polishing
+REF="$INPUT_RACON"
+
+if [[ "$KEEP_INTERMEDIATE" == true ]]; then
+    INTER_DIR="$OUTDIR/intermediate_polish"
+    mkdir -p "$INTER_DIR"
+fi
+
+INTER_FILES=()
+
+# -----------------------------
+# Read all parameters from config.yaml in one Python call
+# -----------------------------
+eval $(python3 - <<END
+import yaml, os
+cfg = yaml.safe_load(open("$CONFIG"))
+params = cfg['racon_polish']
+for k,v in params.items():
+    print(f"{k.upper()}={v}")
+END
+)
+
+# Now Bash has: ALN_RATIO_LOW, ALN_RATIO_HIGH, MIN_LEN_LONG, MIN_IDENTITY_LONG, MIN_QCOV_LONG, MIN_IDENTITY_SHORT, MIN_QCOV_SHORT
+
+# -----------------------------
+# AWK filter using parameters from YAML
+# -----------------------------
+AWK_FILTER='
+{
+    qid=$1; qlen=$2; qs=$3; qe=$4;
+    tid=$6; tlen=$7; ts=$8; te=$9;
+    matches=$10; aln_len=$11;
+
+    if (qid==tid) next;
+
+    identity = matches/aln_len
+    len_ratio_q=(qe-qs)/aln_len
+    len_ratio_t=(te-ts)/aln_len
+
+    if (len_ratio_q <= ALN_RATIO_LOW || len_ratio_q >= ALN_RATIO_HIGH) next
+    if (len_ratio_t <= ALN_RATIO_LOW || len_ratio_t >= ALN_RATIO_HIGH) next
+
+    scov=(te-ts)/tlen
+
+    if (tlen >= MIN_LEN_LONG) {
+        if (identity<MIN_IDENTITY_LONG || scov<MIN_QCOV_LONG) next
+    } else {
+        if (identity<MIN_IDENTITY_SHORT || scov<MIN_QCOV_SHORT) next
+    }
+
+    print
+}
+'
+
+# -----------------------------
+# Racon polishing rounds
+# -----------------------------
+for i in $(seq 1 "$ROUNDS"); do
+    echo "========== Racon polishing round $i =========="
+
+    FILTERED_PAF="$OUTDIR/${i}_filtered.paf"
+    POLISHED="$OUTDIR/polish${i}.fasta"
+
+    minimap2 -x map-ont -t "$THREADS" "$REF" "$READS_FASTQ" | \
+        awk -v ALN_RATIO_LOW="$ALN_RATIO_LOW" \
+            -v ALN_RATIO_HIGH="$ALN_RATIO_HIGH" \
+            -v MIN_LEN_LONG="$MIN_LEN_LONG" \
+            -v MIN_IDENTITY_LONG="$MIN_IDENTITY_LONG" \
+            -v MIN_QCOV_LONG="$MIN_QCOV_LONG" \
+            -v MIN_IDENTITY_SHORT="$MIN_IDENTITY_SHORT" \
+            -v MIN_QCOV_SHORT="$MIN_QCOV_SHORT" \
+            "$AWK_FILTER" > "$FILTERED_PAF"
+
+    racon -t "$THREADS" "$READS_FASTQ" "$FILTERED_PAF" "$REF" > "$POLISHED"
+
+    REF="$POLISHED"
+    INTER_FILES+=("$FILTERED_PAF" "$POLISHED")
+done
+
+FINAL_RACON="$OUTDIR/consensus_racon.fa"
+cp "$REF" "$FINAL_RACON"
+
+echo "========== Racon polishing finished =========="
+echo "Final consensus (Racon): $FINAL_RACON"
+
+# -----------------------------
+# Optional Medaka polishing
+# -----------------------------
+if [[ -n "$MEDAKA_MODEL" ]]; then
+    echo "========== Running Medaka =========="
+
+    MEDAKA_OUTDIR="$OUTDIR/medaka"
+
+    TMP_REF="$MEDAKA_OUTDIR/ref.fa"
+    mkdir -p "$MEDAKA_OUTDIR"
+    cp "$FINAL_RACON" "$TMP_REF"
+
+    medaka_consensus \
+        -i "$READS_FASTQ" \
+        -d "$TMP_REF" \
+        -o "$MEDAKA_OUTDIR/medaka_consensus" \
+        -m "$MEDAKA_MODEL" \
+        -t "$THREADS"
+
+    FINAL_MEDAKA="$OUTDIR/consensus_medaka.fa"
+    cp "$MEDAKA_OUTDIR/medaka_consensus/consensus.fasta" "$FINAL_MEDAKA"
+
+    INTER_FILES+=("$MEDAKA_OUTDIR" "$FINAL_RACON")
+    FINAL_OUTPUT="$FINAL_MEDAKA"
+
+else
+    FINAL_OUTPUT="$FINAL_RACON"
+fi
+
+# -----------------------------
+# Move or remove intermediate files
+# -----------------------------
+if [[ "$KEEP_INTERMEDIATE" == true ]]; then
+    for f in "${INTER_FILES[@]}"; do
+        [[ -e "$f" ]] && mv "$f" "$INTER_DIR/"
+    done
+    echo "Intermediate files moved to: $INTER_DIR"
+else
+    for f in "${INTER_FILES[@]}"; do
+        [[ -e "$f" ]] && rm -rf "$f"
+    done
+fi
+
+echo "========== Pipeline finished =========="
+echo "Final consensus file: $FINAL_OUTPUT"

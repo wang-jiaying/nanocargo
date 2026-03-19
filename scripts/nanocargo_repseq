@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+############################################
+usage() {
+    echo "Usage:"
+    echo "  nanocargo_repseq [-h] -i <input.fa> -o <outdir> [options]"
+    echo "  Use -h for detailed information on all options"
+    exit 1
+}
+############################################
+help() {
+    echo "Usage:"
+    echo "  nanocargo_repseq -i <input.fa> -o <output_dir> [-t threads] [-paf file.paf] [-s coverage]"
+    echo "                   [-m id_cluster] [-n min_internal] [-d distance] [-p id_merge]"
+    echo ""
+    echo "Required arguments:"
+    echo "  -i    Input FASTA file of reads containing tag sequences"
+    echo "  -o    Output directory"
+    echo ""
+    echo "Optional arguments:"
+    echo "  -t INT       Number of threads (default: 16)"
+    echo "  -paf         Input all-vs-all alignment in PAF format (ava-ont)"
+    echo "               If provided, the all-vs-all alignment of the input FASTA will be skipped"
+    echo ""
+    echo "Read filtering parameters:"
+    echo "  -s FLOAT     Minimum coverage fraction to determine containment"
+    echo "               (fraction of the contained read covered by the alignment, default: 0.99)"
+    echo "  -m FLOAT     Minimum alignment identity used to determine containment relationships"
+    echo "               between reads for clustering (default: 0.8)"
+    echo "  -n INT       Maximum number of internal alignments allowed"
+    echo "               (default: 0)"
+    echo "  -d INT       Distance threshold for defining internal alignments"
+    echo "               An alignment is considered internal if its distance (in bp) from read ends"
+    echo "               exceeds this value (default: 1000)"
+    echo ""
+    echo "Final-representative parameters:"
+    echo "  -p FLOAT     Identity threshold used to merge representative reads into final representative reads."
+    echo "               Higher values mean only very similar reads are merged."
+    echo "               (default: 0.8)"
+    echo "  -h           Show this help message"
+    echo ""
+    exit 0
+}
+ 
+
+# -----------------------------
+# Default parameters
+# -----------------------------
+THREADS=16
+INPUT_PAF=""
+SCOV_TH=""
+MA_TH=""
+MA_DELTA=""
+ID_TH=""
+ID_TH2=""
+
+# -----------------------------
+
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+
+# Parse arguments
+# -----------------------------
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -i) INPUT_FA="$2"; shift 2 ;;
+        -paf) INPUT_PAF="$2"; shift 2 ;;
+        -o) OUTDIR="$2"; shift 2 ;;
+        -t) THREADS="$2"; shift 2 ;;
+        -s) SCOV_TH="$2"; shift 2 ;;
+        -n) MA_TH="$2"; shift 2 ;;
+        -d) MA_DELTA="$2"; shift 2 ;;
+        -m) ID_TH="$2"; shift 2 ;;
+        -p) ID_TH2="$2"; shift 2 ;;
+        -h|--help) help ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# -----------------------------
+# Check required arguments
+# -----------------------------
+missing=""
+[[ -z "${INPUT_FA:-}" ]] && missing="$missing -i <input.fa>"
+[[ -z "${OUTDIR:-}" ]] && missing="$missing -o <output_dir>"
+
+if [[ -n "$missing" ]]; then
+    echo "Error: missing required arguments:$missing."
+    usage
+    exit 1
+fi
+
+# -----------------------------
+# Prepare paths
+# -----------------------------
+INPUT_FA=$(realpath "$INPUT_FA")
+OUTDIR=$(realpath -m "$OUTDIR")
+mkdir -p "$OUTDIR"
+
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+CONFIG="$SCRIPT_DIR/config.yaml"
+
+if [[ ! -f "$CONFIG" ]]; then
+    echo "Error: config file not found: $CONFIG"
+    exit 1
+fi
+
+echo "Input fasta: $INPUT_FA"
+echo "Output directory: $OUTDIR"
+echo "Threads: $THREADS"
+echo "Config: $CONFIG"
+
+# -----------------------------
+# Check dependencies
+# -----------------------------
+for cmd in minimap2 seqkit python3 awk sort; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "Error: Required program '$cmd' not found in PATH."
+        exit 1
+    fi
+done
+
+# -----------------------------
+# Define outputs
+# -----------------------------
+FILTERED_PAF="$OUTDIR/alignment_filtered.paf"
+REP_STAT="$OUTDIR/Initial_rep_stat.txt"
+REP_FA="$OUTDIR/initial_rep.fa"
+REP1_FA="$OUTDIR/filtered_rep.fa"
+FINALREP_STAT="$OUTDIR/Finalrep_summary.txt"
+REP2_FA="$OUTDIR/finalrep.fa"
+
+# -----------------------------
+if [[ -n "$INPUT_PAF" ]]; then
+    INPUT_PAF=$(realpath "$INPUT_PAF")
+    if [[ ! -f "$INPUT_PAF" ]]; then
+        echo "Error: input PAF file not found: $INPUT_PAF"
+        usage
+        exit 1
+    fi
+    echo "Using provided PAF file: $INPUT_PAF"
+fi
+
+# -----------------------------
+echo "========== Step 1: Filter alignments =========="
+
+eval $(python3 - <<END
+import yaml
+cfg = yaml.safe_load(open("$CONFIG"))
+params = cfg.get('alignment_filter', {})
+print(f"ALEN_LOW={params.get('ALEN_RATIO_LOW', 0.93)}")
+print(f"ALEN_HIGH={params.get('ALEN_RATIO_HIGH', 1.07)}")
+print(f"ID_LONG={params.get('ID_LONG', 0.8)}")
+print(f"ID_SHORT={params.get('ID_SHORT', 0.9)}")
+print(f"SCOV_LONG={params.get('SCOV_LONG', 0.99)}")
+print(f"SCOV_SHORT={params.get('SCOV_SHORT', 0.99)}")
+print(f"SHORT_LEN={params.get('SHORT_LEN', 4000)}")
+END
+)
+
+AWK_FILTER='
+{
+    qid=$1; qlen=$2; qs=$3; qe=$4;
+    tid=$6; tlen=$7; ts=$8; te=$9;
+    matches=$10; aln_len=$11;
+
+    if (qid==tid) next;
+
+    identity = matches/aln_len
+    if (identity < ID_LONG) next
+
+    if (qlen < tlen) {
+        tmp=qid; qid=tid; tid=tmp;
+        tmp=qlen; qlen=tlen; tlen=tmp;
+        tmp=qs; qs=ts; ts=tmp;
+        tmp=qe; qe=te; te=tmp;
+    }
+
+    tspan=te-ts
+    len_ratio_t=tspan/aln_len
+    if (len_ratio_t<=ALEN_LOW || len_ratio_t>=ALEN_HIGH) next
+    len_ratio_q=(qe-qs)/aln_len
+    if (len_ratio_q<=ALEN_LOW || len_ratio_q>=ALEN_HIGH) next
+
+    scov=tspan/tlen
+    if (tlen >= SHORT_LEN) {
+        if (scov<SCOV_LONG) next
+    } else {
+        if (identity<ID_SHORT || scov<SCOV_SHORT) next
+    }
+
+    print
+}
+'
+
+if [[ -n "$INPUT_PAF" ]]; then
+    echo "Input is a PAF file, skipping minimap2 alignment."
+    LC_ALL=C awk -v ALEN_LOW="$ALEN_LOW" \
+                 -v ALEN_HIGH="$ALEN_HIGH" \
+                 -v ID_LONG="$ID_LONG" \
+                 -v ID_SHORT="$ID_SHORT" \
+                 -v SCOV_LONG="$SCOV_LONG" \
+                 -v SCOV_SHORT="$SCOV_SHORT" \
+                 -v SHORT_LEN="$SHORT_LEN" \
+                 "$AWK_FILTER" "$INPUT_PAF" > "$FILTERED_PAF"
+else
+    echo "Input is a FASTA file, running minimap2 for self-alignment..."
+    minimap2 -x ava-ont -t "$THREADS" -m 200 "$INPUT_FA" "$INPUT_FA" | \
+    LC_ALL=C awk -v ALEN_LOW="$ALEN_LOW" \
+                 -v ALEN_HIGH="$ALEN_HIGH" \
+                 -v ID_LONG="$ID_LONG" \
+                 -v ID_SHORT="$ID_SHORT" \
+                 -v SCOV_LONG="$SCOV_LONG" \
+                 -v SCOV_SHORT="$SCOV_SHORT" \
+                 -v SHORT_LEN="$SHORT_LEN" \
+                 "$AWK_FILTER" > "$FILTERED_PAF"
+fi
+
+# -----------------------------
+echo "========== Step 2: Cluster reads + Filter center=========="
+MIN_READLEN=$(awk 'BEGIN{min=0} /^>/ {if(seq_len>0 && (seq_len<min || min==0)) min=seq_len; seq_len=0; next} {seq_len+=length($0)} END{if(seq_len>0 && (seq_len<min || min==0)) min=seq_len; print min}' "$INPUT_FA")
+echo "Minimum read length: $MIN_READLEN"
+
+if [[ -z "$MIN_READLEN" ]]; then
+    echo "Error: failed to detect MIN_READLEN"
+    exit 1
+fi
+
+python3 "$SCRIPT_DIR/center_filter.py" \
+    --config "$CONFIG" \
+    --paf "$FILTERED_PAF" \
+    --outdir "$OUTDIR" \
+    --minlen "$MIN_READLEN" \
+    ${SCOV_TH:+--scov $SCOV_TH} \
+    ${MA_TH:+--ma $MA_TH} \
+    ${MA_DELTA:+--madelta $MA_DELTA} \
+    ${ID_TH:+--idth $ID_TH}
+
+# -----------------------------
+awk 'NR>1 {print $2}' "$REP_STAT" | \
+seqkit grep -i -f - "$INPUT_FA" -o "$REP_FA"
+
+# -----------------------------
+echo "========== Step 3: Filter rep =========="
+minimap2 -x ava-ont -t "$THREADS" "$REP_FA" "$REP_FA" | \
+sort -k1,1 -k6,6 | \
+python3 "$SCRIPT_DIR/IIRcheck.py" --stdin --config "$CONFIG" --outdir "$OUTDIR"
+
+seqkit grep -v -f "$OUTDIR/selfligateid.txt" "$REP_FA" -o "$REP1_FA"
+
+# -----------------------------
+echo "========== Step 4: Select finalrep =========="
+minimap2 -x ava-ont -t "$THREADS" "$REP1_FA" "$REP1_FA" | \
+python3 "$SCRIPT_DIR/superrep.py" \
+    --stdin \
+    --config "$CONFIG" \
+    --outdir "$OUTDIR" \
+    ${ID_TH2:+--idth2 $ID_TH2}
+
+awk 'NR>1 {print $3}' "$FINALREP_STAT" | \
+seqkit grep -i -f - "$REP1_FA" -o "$REP2_FA"
+
+echo "========== Pipeline finished =========="
+echo "Final representative sequences: $REP2_FA"

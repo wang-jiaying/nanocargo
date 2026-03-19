@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+############################################
+usage() {
+    echo "usage:"
+    echo "  nanocargo_preprocess [-h] -i <input_file> | -d <directory> -o <output_dir> [options]"
+    echo "  Use -h for detailed information on all options"
+    exit 1
+}
+
+############################################
+help() {
+    echo "Usage:"
+    echo "  Single file mode:"
+    echo "    nanocargo_preprocess -i <reads.fastq.gz> -o <output_dir> [-t threads] [-m min_len] [-q min_q]"
+    echo ""
+    echo "  Directory mode:"
+    echo "    nanocargo_preprocess -d <directory> -o <output_dir> [-t threads] [-m min_len] [-q min_q]"
+    echo ""
+    echo "Note: Use either -i or -d, but not both."
+    echo ""
+    echo "Required arguments:"
+    echo "  -i    Input FASTQ file (.fastq.gz)"
+    echo "  -d    Input directory containing multiple FASTQ files"
+    echo "  -o    Output directory"
+    echo ""
+    echo "Optional arguments:"
+    echo "  -t INT       Number of threads (default: 16)"
+    echo "  -m INT       Minimum read length to retain (default: 2000)"
+    echo "  -q INT       Minimum mean read quality score to retain (scaled 0-100 as defined"
+    echo "               by Filtlong; equivalent to --min_mean_q, default: 90)"
+    echo "  -h           Show this help message"
+    echo ""
+    exit 0
+}
+# -------------------------
+# Default values
+# -------------------------
+THREADS=16
+MIN_LEN=2000
+MIN_MEAN_Q=90
+
+INPUT_FILE=""
+INPUT_DIR=""
+OUTDIR=""
+
+
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+# -------------------------
+# Parse arguments
+# -------------------------
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -i) INPUT_FILE="$2"; shift 2 ;;
+        -d) INPUT_DIR="$2"; shift 2 ;;
+        -o) OUTDIR="$2"; shift 2 ;;
+        -m) MIN_LEN="$2"; shift 2 ;;
+        -q) MIN_MEAN_Q="$2"; shift 2 ;;
+        -t) THREADS="$2"; shift 2 ;;
+        -h|--help) help ;;
+        *) echo "Unknown option: $1"; usage ;;
+    esac
+done
+
+# -------------------------
+# Validate arguments
+# -------------------------
+if [[ -z "$OUTDIR" ]]; then
+    echo "Error: Output directory must be specified with -o"
+    usage
+fi
+
+if [[ -n "$INPUT_FILE" && -n "$INPUT_DIR" ]]; then
+    echo "Error: Please specify either -i or -d, not both."
+    exit 1
+fi
+
+if [[ -z "$INPUT_FILE" && -z "$INPUT_DIR" ]]; then
+    echo "Error: Must provide either -i (input file) or -d (input directory)"
+    usage
+fi
+
+# -------------------------
+# Check dependencies
+# -------------------------
+for cmd in porechop filtlong seqkit realpath; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "Error: Required program '$cmd' not found in PATH."
+        exit 1
+    fi
+done
+
+# -------------------------
+# Prepare output directories
+# -------------------------
+OUTDIR=$(realpath -m "$OUTDIR")
+mkdir -p "$OUTDIR"
+
+MERGED_FASTQ="$OUTDIR/merged.fastq.gz"
+TRIMMED_FASTQ="$OUTDIR/trimmed.fastq.gz"
+FILTERED_FASTQ="$OUTDIR/filtered_trimmed.fastq"
+
+# -------------------------
+echo "========== Step 1: Prepare input =========="
+if [[ -n "$INPUT_DIR" ]]; then
+    INPUT_DIR=$(realpath "$INPUT_DIR")
+
+    if [[ ! -d "$INPUT_DIR" ]]; then
+        echo "Error: Input directory does not exist."
+        exit 1
+    fi
+
+    shopt -s nullglob
+    files=("$INPUT_DIR"/*.fastq.gz)
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "Error: No fastq.gz files found in directory."
+        exit 1
+    fi
+
+    echo "Input is directory. Merging ${#files[@]} fastq.gz files..."
+    zcat "${files[@]}" | gzip > "$MERGED_FASTQ"
+
+elif [[ -n "$INPUT_FILE" ]]; then
+    INPUT_FILE=$(realpath "$INPUT_FILE")
+
+    if [[ ! -f "$INPUT_FILE" ]]; then
+        echo "Error: Input file does not exist."
+        exit 1
+    fi
+
+    echo "Input is single fastq.gz file."
+    cp "$INPUT_FILE" "$MERGED_FASTQ"
+fi
+
+# -------------------------
+echo "========== Step 2: Trim + Filter =========="
+
+porechop -t "$THREADS" -i "$MERGED_FASTQ" -o "$TRIMMED_FASTQ"
+filtlong \
+    --min_mean_q "$MIN_MEAN_Q" \
+    --min_length "$MIN_LEN"  "$TRIMMED_FASTQ"  > "$FILTERED_FASTQ"
+    
+cat "$FILTERED_FASTQ" | seqkit seq | seqkit stats
+
+rm "$MERGED_FASTQ"
+echo "========== Preprocessing finished =========="
+echo "Outputs:"
+echo "  FASTQ (trimmed & filtered): $FILTERED_FASTQ"

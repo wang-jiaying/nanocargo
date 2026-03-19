@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+############################################
+usage() {
+    echo "Usage:"
+    echo "  nanocargo_tag_filter [-h] -i <input_file> -o <outdir> -s <start_tag.fa> -e <end_tag.fa> [options]"
+    echo "  Use -h for detailed information on all options"
+    exit 1
+}
+
+############################################
+
+help() {
+    echo "Usage:"
+    echo "  nanocargo_tag_filter -i <input_reads> -o <outdir> -s <start_tag.fa> -e <end_tag.fa>"
+    echo "                       [-t threads] [-r min_ratio] [-x max_offset]"
+    echo ""
+    echo "Required arguments:"
+    echo "  -i    Input reads file (FASTA or FASTQ; .fa/.fq, optionally gzipped)"
+    echo "  -o    Output directory"
+    echo "  -s    FASTA file containing tag sequences marking the start of the amplicon reads"
+    echo "  -e    FASTA file containing tag sequences marking the end of the amplicon reads"
+    echo ""
+    echo "Optional arguments:"
+    echo "  -t INT       Number of threads (default: 16)"
+    echo "  -r FLOAT     Minimum fraction of the tag sequence that must be covered in the read (default: 0.5)"
+    echo "  -x INT       Maximum allowed distance (bp) between the tag and the read end (default: 400)"
+    echo "  -h           Show this help message"
+    echo ""
+    exit 0
+}
+
+
+# -----------------------------
+# Default parameters
+# -----------------------------
+THREADS=8
+MIN_RATIO=0.5
+MAX_OFFSET=400
+
+# -----------------------------
+
+
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+
+# Parse arguments
+# -----------------------------
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -i) INPUT_FA="$2"; shift 2 ;;
+        -o) OUTDIR="$2"; shift 2 ;;
+        -s) START_TAG="$2"; shift 2 ;;
+        -e) END_TAG="$2"; shift 2 ;;
+        -t) THREADS="$2"; shift 2 ;;
+        -r) MIN_RATIO="$2"; shift 2 ;;
+        -x) MAX_OFFSET="$2"; shift 2 ;;
+        -h|--help) help ;;
+        *) echo "Unknown option: $1"; usage ;;
+    esac
+done
+
+# -----------------------------
+# Validate arguments
+# -----------------------------
+if [[ -z "${INPUT_FA:-}" || -z "${OUTDIR:-}" || -z "${START_TAG:-}" || -z "${END_TAG:-}" ]]; then
+    echo "ERROR: -i -o -s -e are required"
+    usage
+fi
+
+# -----------------------------
+# Check dependencies
+# -----------------------------
+for cmd in minimap2 seqkit realpath awk; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "ERROR: Required program '$cmd' not found."
+        exit 1
+    fi
+done
+
+# -----------------------------
+# Resolve paths
+# -----------------------------
+INPUT_FA=$(realpath "$INPUT_FA")
+START_TAG=$(realpath "$START_TAG")
+END_TAG=$(realpath "$END_TAG")
+OUTDIR=$(realpath -m "$OUTDIR")
+
+mkdir -p "$OUTDIR"
+
+# -----------------------------
+
+# -----------------------------
+# Output files
+# -----------------------------
+FILTERED_FA="$OUTDIR/tagged_seq.fa"
+
+echo "========== Run minimap2 =========="
+
+{
+awk '/^>/ {print ">S"substr($0,2); next} {print}' "$START_TAG"
+awk '/^>/ {print ">E"substr($0,2); next} {print}' "$END_TAG"
+} | \
+minimap2 -t "$THREADS" -x map-ont  -  "$INPUT_FA" | \
+awk -v min_ratio="$MIN_RATIO" -v max_off="$MAX_OFFSET" '{
+
+    if ($11/$7 <= min_ratio) next
+
+    left_plus  = ($3 < max_off && $5 == "+" && $6 ~ /^S/)
+    left_minus = (($2-$4) < max_off && $5 == "-" && $6 ~ /^S/)
+    right_plus = (($2-$4) < max_off && $5 == "+" && $6 ~ /^E/)
+    right_minus= ($3 < max_off && $5 == "-" && $6 ~ /^E/)
+
+    if (left_plus || left_minus || right_plus || right_minus)
+        print $1
+}' | \
+sort -u | \
+seqkit grep -i -f - "$INPUT_FA" | \
+seqkit fq2fa -o "$FILTERED_FA"
+
+echo "========== Finished =========="
+echo "Output:"
+echo "  $FILTERED_FA"

@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+############################################
+# NanoCargo Full Pipeline
+############################################
+
+usage() {
+    echo "Usage:"
+    echo "  nanocargo_pipeline [-h] -i <reads.fastq.gz> | -d <directory> -o <output_dir> "
+    echo "                          -s <start_tag.fa> -e <end_tag.fa> [options]"
+    echo "  Use -h for detailed information on all options"
+    exit 1
+}
+
+help() {
+    echo "Usage:"
+    echo "  Single file mode:"
+    echo "    nanocargo_pipeline -i <reads.fastq.gz> -o <output_dir> -s <start_tag.fa> -e <end_tag.fa> [-t <threads>]"
+    echo "                      [-r <racon_rounds>] [-m <medaka_model>] [--keep-intermediate]"
+    echo ""
+    echo "  Directory mode:"
+    echo "    nanocargo_pipeline -d <directory> -o <output_dir> -s <start_tag.fa> -e <end_tag.fa> [-t <threads>]"
+    echo "                      [-r <racon_rounds>] [-m <medaka_model>] [--keep-intermediate]"
+    echo ""
+    echo "Note: Use either -i or -d, but not both."
+    echo ""
+    echo "Required arguments:"
+    echo "  -i    Input FASTQ file (.fastq or .fastq.gz)"
+    echo "  -d    Input directory containing multiple FASTQ files"
+    echo "  -s    FASTA file containing tag sequences marking the start of the amplicon reads"
+    echo "  -e    FASTA file containing tag sequences marking the end of the amplicon reads"
+    echo "  -o    Output directory"
+    echo ""
+    echo "Optional arguments:"
+    echo "  -t INT              Number of threads (default: 16)"
+    echo "  -r INT              Number of Racon polishing rounds (default: 3)"
+    echo "  -m MODEL            Medaka model. Medaka polishing runs only if a model is provided (default: none)"
+    echo "  --keep-intermediate Keep intermediate files generated during polishing (default: false)"
+    echo "  -h                  Show this help message"
+    echo ""
+    exit 0
+}
+
+# -----------------------------
+# Default parameters
+# -----------------------------
+THREADS=16
+POLISH_ROUNDS=3
+MEDAKA_MODEL=""
+KEEP_INTERMEDIATE=false
+
+# -----------------------------
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+# Parse arguments
+# -----------------------------
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -i) INPUT_FILE="$2"; shift 2 ;;
+        -d) INPUT_DIR="$2"; shift 2 ;;
+        -o) OUTDIR="$2"; shift 2 ;;
+        -s) START_TAG="$2"; shift 2 ;;
+        -e) END_TAG="$2"; shift 2 ;;
+        -t) THREADS="$2"; shift 2 ;;
+        -r) POLISH_ROUNDS="$2"; shift 2 ;;
+        -m) MEDAKA_MODEL="$2"; shift 2 ;;
+        --keep-intermediate) KEEP_INTERMEDIATE=true; shift ;;
+        -h|--help) help ;;
+        *) echo "Unknown option: $1"; usage ;;
+    esac
+done
+
+# -----------------------------
+# Check dependencies
+# -----------------------------
+for cmd in nanocargo_preprocess nanocargo_tag_filter nanocargo_repseq nanocargo_polish; do
+    command -v $cmd >/dev/null 2>&1 || { echo "$cmd not found"; exit 1; }
+done
+
+# -----------------------------
+# Validate required args
+# -----------------------------
+if [[ -z "${OUTDIR:-}" ]]; then
+    echo "ERROR: -o output directory is required"
+    usage
+fi
+
+if [[ -z "${START_TAG:-}" || -z "${END_TAG:-}" ]]; then
+    echo "ERROR: -s <start_tag.fa> and -e <end_tag.fa> are required"
+    usage
+fi
+
+if [[ -z "${INPUT_FILE:-}" && -z "${INPUT_DIR:-}" ]]; then
+    echo "ERROR: Either -i or -d must be provided"
+    usage
+fi
+
+if [[ -n "${INPUT_FILE:-}" && -n "${INPUT_DIR:-}" ]]; then
+    echo "ERROR: Use either -i or -d, not both"
+    usage
+fi
+
+# -----------------------------
+# Resolve paths
+# -----------------------------
+OUTDIR=$(realpath -m "$OUTDIR")
+
+if [[ -d "$OUTDIR" && "$(ls -A "$OUTDIR")" ]]; then
+    echo "ERROR: Output directory is not empty:"
+    echo "  $OUTDIR"
+    echo "Please provide an empty directory or remove existing files."
+    exit 1
+fi
+mkdir -p "$OUTDIR"
+
+START_TAG=$(realpath "$START_TAG")
+END_TAG=$(realpath "$END_TAG")
+
+if [[ -n "${INPUT_FILE:-}" ]]; then
+    INPUT_FILE=$(realpath "$INPUT_FILE")
+else
+    INPUT_DIR=$(realpath "$INPUT_DIR")
+fi
+
+# -----------------------------
+# Define step directories
+# -----------------------------
+PREPROCESS_DIR="$OUTDIR/preprocess"
+TAGGED_DIR="$OUTDIR/taggedseq"
+REPSEQ_DIR="$OUTDIR/repseq"
+POLISH_DIR="$OUTDIR/polish"
+
+mkdir -p "$PREPROCESS_DIR" "$TAGGED_DIR" "$REPSEQ_DIR" "$POLISH_DIR"
+
+echo "========== NanoCargo Pipeline =========="
+echo "Output directory : $OUTDIR"
+echo "Threads          : $THREADS"
+echo "Polish rounds    : $POLISH_ROUNDS"
+echo "Medaka model     : $MEDAKA_MODEL"
+echo "Start tag        : $START_TAG"
+echo "End tag          : $END_TAG"
+echo "Keep intermediate: $KEEP_INTERMEDIATE"
+echo "========================================"
+
+############################################
+# Step 1
+############################################
+
+echo "Step 1: Preprocess"
+
+nanocargo_preprocess \
+    ${INPUT_FILE:+-i $INPUT_FILE} \
+    ${INPUT_DIR:+-d $INPUT_DIR} \
+    -o "$PREPROCESS_DIR" \
+    -t "$THREADS"
+
+############################################
+# Step 2
+############################################
+
+echo "Step 2: Tag filtering"
+
+nanocargo_tag_filter \
+    -i "$PREPROCESS_DIR/filtered_trimmed.fastq" \
+    -o "$TAGGED_DIR" \
+    -s "$START_TAG" \
+    -e "$END_TAG" \
+    -t "$THREADS"
+
+############################################
+# Step 3
+############################################
+
+echo "Step 3: Representative sequence generation"
+
+nanocargo_repseq \
+    -i "$TAGGED_DIR/tagged_seq.fa" \
+    -o "$REPSEQ_DIR" \
+    -t "$THREADS"
+
+############################################
+# Step 4
+############################################
+
+echo "Step 4: Polishing"
+
+if [[ "$KEEP_INTERMEDIATE" == true ]]; then
+    KEEP_FLAG="--keep-intermediate"
+else
+    KEEP_FLAG=""
+fi
+
+nanocargo_polish \
+    -i "$REPSEQ_DIR/finalrep.fa" \
+    -f "$PREPROCESS_DIR/filtered_trimmed.fastq" \
+    -o "$POLISH_DIR" \
+    -t "$THREADS" \
+    -r "$POLISH_ROUNDS" \
+    -m "$MEDAKA_MODEL" \
+    $KEEP_FLAG
+
+echo ""
+echo "========== Pipeline finished =========="
+echo "Final polished sequences:"
+echo "  $POLISH_DIR"
+echo ""

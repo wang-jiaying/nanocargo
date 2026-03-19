@@ -1,0 +1,308 @@
+# =============================================================================
+# nanocargo  —  Example Configuration File
+# =============================================================================
+# Copy this file to config.yaml and adjust parameters as needed.
+#
+# Module-to-script mapping:
+#   alignment_filter  ->  nanocargo_repseq.sh (inline awk filter)
+#   collapse_reads    ->  center_filter.py
+#   self_ligation     ->  IIRcheck.py
+#   rep_superbin      ->  superrep.py
+#   racon_polish      ->  (Racon polishing step)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# [Step 1]  alignment_filter
+# Initial filtering of all-vs-all PAF alignments to retain high-quality
+# containment alignments.
+# Long reads (>= SHORT_CENTER_LEN) are filtered by ID_LONG / SCOV_LONG;
+# short reads (< SHORT_CENTER_LEN) are filtered by the stricter ID_SHORT /
+# SCOV_SHORT thresholds.
+# -----------------------------------------------------------------------------
+alignment_filter:
+
+  # Lower bound on the ratio of aligned span to alignment length.
+  # Alignments below this ratio are considered unreliable and are discarded.
+  ALEN_RATIO_LOW: 0.93
+
+  # Upper bound on the ratio of aligned span to alignment length.
+  # Alignments exceeding this ratio are also treated as abnormal.
+  ALEN_RATIO_HIGH: 1.07
+
+  # Minimum alignment identity (matches / alignment_length) for long reads.
+  # Applied when the target length >= SHORT_CENTER_LEN.
+  # Can be overridden by command-line flag -m.
+  ID_LONG: 0.8
+
+  # Minimum alignment identity for short reads.
+  # Applied when the target length < SHORT_CENTER_LEN (stricter threshold).
+  ID_SHORT: 0.9
+
+  # Minimum target coverage (target span / target length) required for a long
+  # read to be considered contained.
+  SCOV_LONG: 0.99
+
+  # Minimum target coverage required for a short read to be considered
+  # contained.
+  # Can be overridden by command-line flag -s.
+  SCOV_SHORT: 0.99
+
+  # Length cutoff (bp) separating short reads from long reads.
+  # Reads with target length below this value use ID_SHORT / SCOV_SHORT.
+  SHORT_LEN: 4000
+
+
+# -----------------------------------------------------------------------------
+# [Step 2]  collapse_reads
+# Clusters reads based on containment relationships and selects a
+# representative center read from each cluster.
+# A candidate center must satisfy endpoint distribution criteria (LA / RA / MA
+# counts) and IQR consistency checks.
+# Command-line flags -s / -n / -d / -m override SCOV_TH / MA_TH /
+# MA_DELTA / ID_TH respectively.
+# -----------------------------------------------------------------------------
+collapse_reads:
+
+  # Minimum query coverage (query span / query length) for containment.
+  # Set to 0 to disable query coverage filtering.
+  QCOV_TH: 0
+
+  # Minimum target coverage (target span / target length) for containment.
+  # Can be overridden by command-line flag -s.
+  SCOV_TH: 0.99
+
+  # Minimum alignment identity used for containment assignment and endpoint
+  # classification.
+  # Can be overridden by command-line flag -m.
+  ID_TH: 0.8
+
+  # Endpoint classification tolerance (bp).
+  # An alignment is classified as LA or RA if its start / end position is
+  # within DELTA bp of the read ends.
+  DELTA: 60
+
+  # Full-alignment (FA) detection threshold.
+  # An alignment is counted as FA when both query coverage > FA_COV_TH and
+  # target coverage > FA_COV_TH.
+  FA_COV_TH: 0.99
+
+  # Maximum number of internal (MA) alignments allowed in a candidate center.
+  # Candidates with more MA alignments than this threshold are rejected, as
+  # excess internal alignments suggest structural abnormalities.
+  # Can be overridden by command-line flag -n.
+  MA_TH: 0
+
+  # Distance threshold (bp) for classifying an alignment as internal (MA).
+  # An alignment is MA if both its start and end positions are more than
+  # MA_DELTA bp away from either end of the read.
+  # Can be overridden by command-line flag -d.
+  MA_DELTA: 1000
+
+  # Length cutoff (bp) for short center read candidates.
+  # Candidates shorter than this value must additionally satisfy
+  # MIN_SHORT_CENTER_NUM to be accepted.
+  SHORT_CENTER_LEN: 4000
+
+  # Minimum number of FA alignments required for a short center read candidate 
+  # to pass.
+  MIN_SHORT_CENTER_NUM: 5
+
+  # Minimum total support count (FA + LRA) required for a center read to be
+  # accepted.
+  CENTER_MIN_SUPPORT: 3
+
+  # Minimum number of LA alignments and RA alignments each required for a
+  # candidate center to pass.
+  MIN_LA_RA: 5
+
+  # --- IQR consistency filtering ---
+  # The IQR (interquartile range) of LA / RA endpoint positions measures how
+  # consistently reads align to the candidate center. 
+
+  # Minimum number of endpoint observations required to compute a meaningful
+  # IQR. If fewer observations are available, IQR defaults to 1.0.
+  IQR_MIN_SUPPORT: 5
+
+  # Lower IQR bound. Candidates with IQR below this value are rejected because
+  # their endpoints are too uniformly clustered, suggesting that the breakpoints 
+  # are not randomly distributed, which may indicate library preparation artifacts 
+  # or sequence-specific fragmentation bias.
+  IQR_TH1: 0.03
+
+  # Upper IQR bound for the intermediate zone. When IQR falls between IQR_TH1
+  # and IQR_TH2, the candidate must have at least LRA_MIN paired LA+RA
+  # alignments to pass.
+  IQR_TH2: 0.08
+
+  # Minimum number of paired LA+RA alignments (LRA) required when the IQR
+  # falls in the intermediate zone [IQR_TH1, IQR_TH2].
+  LRA_MIN: 3
+
+
+# -----------------------------------------------------------------------------
+# [Step 3]  self_ligation
+# Detects self-ligation artifacts in representative reads. Detection is based on 
+# identifying pairs of reverse-complementary chained alignments within the same read pair.
+# -----------------------------------------------------------------------------
+self_ligation:
+
+  # Minimum length (bp) of a single alignment to be considered valid.
+  # Shorter alignments are ignored.
+  min_align_len: 400
+
+  # Lower bound on per-alignment coverage (aligned span / read length).
+  # Alignments with coverage below this value are treated as noise.
+  min_cov: 0.05
+
+  # Upper bound on per-alignment coverage.
+  # Alignments covering most of the read length are not suitable for chain
+  # analysis and are excluded.
+  max_cov: 0.9
+
+  # Lower bound on the ratio of aligned span to alignment length
+  # (used to filter out structurally abnormal alignments).
+  ratio_lower: 0.93
+
+  # Upper bound on the same ratio.
+  ratio_upper: 1.07
+
+  # The sum of coverage from two chained alignments must exceed this value,
+  # ensuring the pair together covers the majority of the read.
+  cov_sum: 0.95
+
+  # Bounds on the positional junction ratio between two consecutive alignments
+  # along the query coordinate (r1.qe / r2.qs or equivalent).
+  # Values outside [query_chain_lower, query_chain_upper] indicate the two
+  # alignments do not form a proper chain.
+  query_chain_lower: 0.9
+  query_chain_upper: 1.11
+
+  # Bounds on the positional junction ratio between two consecutive alignments
+  # along the subject coordinate.
+  subject_chain_lower: 0.87
+  subject_chain_upper: 1.15
+
+
+# -----------------------------------------------------------------------------
+# [Step 4]  rep_superbin
+# Performs a second-pass consolidation of filtered representative reads:
+#   1. Removes redundant representatives that are contained within longer ones.
+#   2. Builds a similarity graph and merges highly similar representatives into
+#      connected components.
+#   3. Selects the best final representative from each connected component.
+# -----------------------------------------------------------------------------
+rep_superbin:
+
+  # Path to the center-read statistics file produced by Step 2
+  # (relative to the output directory).
+  REP_STAT: "Initial_rep_stat.txt"
+
+  # Path to the final representative summary file produced by this step.
+  OUT_SUPERREP: "Finalrep_summary.txt"
+
+  # --- Redundancy removal thresholds (standard / long reads) ---
+
+  # Minimum alignment identity required to flag a representative as redundant.
+  ID_TH: 0.85
+
+  # Minimum target (shorter read) coverage required for redundancy detection.
+  SCOV_TH: 0.98
+
+  # Acceptable range of alen_ratio (query span / alignment length) for a
+  # containment alignment to be considered valid.
+  ALEN_RATIO_LOW: 0.9
+  ALEN_RATIO_HIGH: 1.1
+
+  # Maximum query coverage allowed in a redundancy alignment.
+  # If query coverage exceeds this value, the relationship is not treated as
+  # containment and the read is kept.
+  QCOV_MAX: 0.9
+
+  # --- Redundancy removal thresholds (short reads, length <= SHORT_LEN) ---
+
+  # Length cutoff (bp) below which the short-read redundancy thresholds apply.
+  SHORT_LEN: 3000
+
+  # Minimum alignment identity for short-read redundancy detection.
+  ID_TH_SHORT: 0.9
+
+  # Minimum target coverage for short-read redundancy detection.
+  SCOV_TH_SHORT: 0.9
+
+  # Maximum query coverage for short-read redundancy detection.
+  QCOV_MAX_SHORT: 0.7
+
+  # --- Similarity graph construction thresholds ---
+  # Edges are added between two representatives when they meet either the
+  # standard coverage + identity criteria OR the strong-link criteria below.
+
+  # Minimum query coverage required to add a standard graph edge.
+  QCOV_TH: 0.98
+
+  # Minimum subject coverage required to add a standard graph edge.
+  SCOV_TH2: 0.98
+
+  # Minimum alignment identity required to add a standard graph edge.
+  # Can be overridden by command-line flag -p.
+  ID_TH2: 0.8
+
+  # Acceptable length ratio range (min_len / max_len) between two
+  # representatives. Pairs outside this range are not connected, regardless
+  # of identity or coverage.
+  LEN_RATIO_LOW: 0.9
+  LEN_RATIO_HIGH: 1.1
+
+  # --- Strong-link thresholds ---
+  # High-confidence edges added when identity and both coverage values exceed
+  # these stricter thresholds (alternative to the standard criteria above via
+  # an OR condition; LEN_RATIO still applies).
+  STRONG_ID_TH: 0.9
+  STRONG_SCOV_TH: 0.99
+  STRONG_QCOV_TH: 0.95
+
+
+# -----------------------------------------------------------------------------
+# [Step 5]  racon_polish
+# Filters alignments before passing them to Racon for consensus polishing.
+# Long reads (target length >= min_len_long) use relaxed identity thresholds;
+# short reads use stricter thresholds to avoid spurious alignments.
+# -----------------------------------------------------------------------------
+racon_polish:
+
+  # Lower bound on the ratio of aligned span to alignment length,
+  # applied to both query and target.
+  # Alignments below this ratio are considered structurally abnormal
+  # and are discarded before Racon input.
+  aln_ratio_low: 0.93
+
+  # Upper bound on the same ratio of aligned span to alignment length.
+  # Alignments exceeding this ratio are also treated as abnormal and discarded.
+  aln_ratio_high: 1.07
+
+  # Length cutoff (bp) separating long reads from short reads.
+  # Reads with target length >= this value use the long-read identity /
+  # coverage thresholds below; shorter reads use the short-read thresholds.
+  min_len_long: 4000
+
+  # Minimum alignment identity (matches / alignment_length) required for a
+  # long read (target length >= min_len_long) to be passed to Racon.
+  # Long reads are given a more relaxed identity threshold because Racon can
+  # tolerate slightly noisier alignments when sufficient coverage exists.
+  min_identity_long: 0.75
+
+  # Minimum query coverage (query aligned span / query length) required for a
+  # long read alignment to be passed to Racon.
+  # Near-full-length alignments are used to avoid partial overlaps
+  # introducing errors during polishing.
+  min_qcov_long: 0.98
+
+  # Minimum alignment identity required for a short read
+  # (target length < min_len_long) to be passed to Racon.
+  # Short reads use a stricter identity threshold because short, low-identity
+  # alignments are more likely to be spurious.
+  min_identity_short: 0.9
+
+  # Minimum query coverage required for a short read alignment to be passed
+  # to Racon.
+  min_qcov_short: 0.98
