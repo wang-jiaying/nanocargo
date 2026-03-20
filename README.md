@@ -250,7 +250,9 @@ nanocargo_pipeline -d <directory>      -o <output_dir> -s <start_tag.fa> -e <end
 
 ## Configuration
 
-The default parameters work well for most datasets. If you need to tune the pipeline,
+The default parameters were optimized for Oxford Nanopore data basecalled with 
+`dna_r10.4.1_e8.2_400bps_sup@v4.3.0` and may need adjustment for other 
+basecalling models or dataset characteristics. If you need to tune the pipeline,
 copy the annotated template to `config.yaml` and edit the values:
 
 ```bash
