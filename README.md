@@ -1,3 +1,4 @@
+[![DOI](https://zenodo.org/badge/1186161821.svg)](https://doi.org/10.5281/zenodo.19441193)
 # nanocargo
 
 ## Overview
@@ -14,9 +15,9 @@ user-defined steps.
 
 ## Citation
 
-If you use nanocargo in your research, please cite this repository:
+If you use nanocargo in your research, please cite:
 
-Wang J. (2026). nanocargo. GitHub. https://github.com/wang-jiaying/nanocargo
+Wang J. (2026). nanocargo (Version 0.1.0). GitHub. Zenodo. https://doi.org/10.5281/zenodo.19441193
 
 ---
 
