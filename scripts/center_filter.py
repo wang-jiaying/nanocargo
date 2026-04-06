@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import sys
 import yaml
 import os
+import pandas as pd
 from collections import defaultdict
 import argparse
 
@@ -37,7 +39,7 @@ with open(args.config) as f:
 QCOV_TH = cfg.get("QCOV_TH", 0)
 SCOV_TH = cfg.get("SCOV_TH", 0.99)
 ID_TH = cfg.get("ID_TH", 0.8)
-DELTA = cfg.get("DELTA", 60)
+DELTA = cfg.get("DELTA", 50)
 FA_COV_TH = cfg.get("FA_COV_TH", 0.99)
 MA_TH = cfg.get("MA_TH", 0)
 MA_DELTA = cfg.get("MA_DELTA", 1000)
@@ -48,9 +50,9 @@ MIN_LA_RA = cfg.get("MIN_LA_RA", 5)
 
 # IQR thresholds
 LRA_MIN = cfg.get("LRA_MIN", 3)
-IQR_MIN_SUPPORT = cfg.get("IQR_MIN_SUPPORT", 5) 
+IQR_MIN_SUPPORT = cfg.get("IQR_MIN_SUPPORT", 5)
 IQR_TH1 = cfg.get("IQR_TH1", 0.03)
-IQR_TH2 = cfg.get("IQR_TH2", 0.08) 
+IQR_TH2 = cfg.get("IQR_TH2", 0.08)
 
 # override by command line if provided
 if args.scov is not None:
@@ -93,26 +95,13 @@ def iqr_from_pos(pos, qlen, min_len=None):
     q75 = pos[int(0.75 * (n - 1))]
     return (q75 - q25) / max(qlen - min_len, 1)
 
-def compute_iqr(read, aln_by_query, qlen):
-    LA_pos, RA_pos = [], []
-    for qs, qe, _, _, _, identity, role, _ in aln_by_query.get(read, []):
-        if role != "query" or identity <= ID_TH:
-            continue
-        at = classify_endpoint(qs, qe, qlen)
-        if at == "LA":
-            LA_pos.append(qe)
-        elif at == "RA":
-            RA_pos.append(qs)
-    LA_iqr = iqr_from_pos(LA_pos, qlen)
-    RA_iqr = iqr_from_pos(RA_pos, qlen)
-    return min(LA_iqr, RA_iqr)
-
-def endpoint_stat(read, aln_by_query):
-
+# -------------------------
+def endpoint_stat_and_iqr(read, aln_by_query, qlen):
     FAq = FAs = LA = RA = MA = 0
     LA_qcov, RA_qcov = [], []
+    pos = []   
 
-    for qs, qe, qlen, qcov, scov, identity, role, mate in aln_by_query.get(read, []):
+    for qs, qe, rqlen, qcov, scov, identity, role, mate in aln_by_query.get(read, []):
 
         if qcov > FA_COV_TH and scov > FA_COV_TH and identity > ID_TH:
             if role == "query":
@@ -120,20 +109,26 @@ def endpoint_stat(read, aln_by_query):
             else:
                 FAs += 1
             continue
+
         if role != "query":
             continue
-        at = classify_endpoint(qs, qe, qlen)
+
+        at = classify_endpoint(qs, qe, rqlen)
+
         if at == "LA":
             LA += 1
             if identity > ID_TH:
                 LA_qcov.append(qcov)
+                pos.append(qe)   
         elif at == "RA":
             RA += 1
             if identity > ID_TH:
                 RA_qcov.append(qcov)
+                pos.append(qs)   
         elif at == "MA":
             MA += 1
 
+    # ---- LRA ----
     LA_qcov.sort(reverse=True)
     RA_qcov.sort(reverse=True)
 
@@ -144,7 +139,17 @@ def endpoint_stat(read, aln_by_query):
         else:
             break
 
-    return FAq, FAs, LRA, LA, RA, MA
+    # ---- IQR ----
+    if len(pos) < IQR_MIN_SUPPORT:
+        IQR_value = 1.0
+    else:
+        pos.sort()
+        n = len(pos)
+        q25 = pos[int(0.25 * (n - 1))]
+        q75 = pos[int(0.75 * (n - 1))]
+        IQR_value = (q75 - q25) / max(qlen - MIN_READLEN, 1)
+
+    return FAq, FAs, LRA, LA, RA, MA, IQR_value
 
 def pass_center_cond(FAq, FAs, LRA, LA, RA, MA, IQR_value):
     if MA > MA_TH:
@@ -155,15 +160,13 @@ def pass_center_cond(FAq, FAs, LRA, LA, RA, MA, IQR_value):
         return False
     if min(LA, RA) < MIN_LA_RA:
         return False
-    if IQR_TH1 < IQR_value < IQR_TH2 and LRA < LRA_MIN:
+    if IQR_TH1 <= IQR_value < IQR_TH2 and LRA < LRA_MIN:
         return False
     if IQR_value < IQR_TH1:
         return False
     return True
 
-
 def get_all_members(center, contains):
-
     members = set()
     stack = [center]
     while stack:
@@ -179,37 +182,49 @@ def get_all_members(center, contains):
 def main():
     contains = defaultdict(set)
     incoming = defaultdict(set)
-    read_len = {}
     aln_by_query = defaultdict(list)
 
-    # ---- Read PAF ----
-    with open(args.paf) as f:
-        for line in f:
-            fs = line.rstrip().split("\t")
-            qid, qlen, qs, qe = fs[0], int(fs[1]), int(fs[2]), int(fs[3])
-            tid, tlen, ts, te = fs[5], int(fs[6]), int(fs[7]), int(fs[8])
-            matches, aln_len = int(fs[9]), int(fs[10])
+    # -------------------------
+    try:
+        df = pd.read_csv(
+            args.paf,
+            sep="\t",
+            header=None,
+            usecols=[0, 1, 2, 3, 5, 6, 7, 8, 9, 10],
+            names=["qid", "qlen", "qs", "qe", "tid", "tlen", "ts", "te", "matches", "alen"],
+            dtype={
+                "qid": str, "qlen": int, "qs": int, "qe": int,
+                "tid": str, "tlen": int, "ts": int, "te": int,
+                "matches": int, "alen": int
+            }
+        )
+    except Exception as e:
+        sys.exit(f"[ERROR] Failed to read PAF file: {e}")
 
-            identity = matches / aln_len
-            qcov = (qe - qs) / qlen
-            scov = (te - ts) / tlen
-
-            read_len[qid] = qlen
-            read_len[tid] = tlen
-
-            aln_by_query[qid].append(
-                (qs, qe, qlen, qcov, scov, identity, "query", tid)
-            )
-            aln_by_query[tid].append(
-                (ts, te, tlen, scov, qcov, identity, "target", qid)
-            )
-
-            if qcov > QCOV_TH and scov > SCOV_TH and identity > ID_TH:
-                contains[qid].add(tid)
-                incoming[tid].add(qid)
-
-    if not read_len:
+    if df.empty:
         sys.exit("[ERROR] No alignments loaded from PAF file. The file may be empty or malformed.")
+
+    df["identity"] = df["matches"] / df["alen"]
+    df["qcov"]     = (df["qe"] - df["qs"]) / df["qlen"]
+    df["scov"]     = (df["te"] - df["ts"]) / df["tlen"]
+
+    read_len = {}
+    for _, row in df[["qid", "qlen"]].drop_duplicates("qid").iterrows():
+        read_len[row["qid"]] = row["qlen"]
+    for _, row in df[["tid", "tlen"]].drop_duplicates("tid").iterrows():
+        read_len[row["tid"]] = row["tlen"]
+
+    for row in df.itertuples(index=False):
+        aln_by_query[row.qid].append(
+            (row.qs, row.qe, row.qlen, row.qcov, row.scov, row.identity, "query", row.tid)
+        )
+        aln_by_query[row.tid].append(
+            (row.ts, row.te, row.tlen, row.scov, row.qcov, row.identity, "target", row.qid)
+        )
+
+        if row.qcov > QCOV_TH and row.scov > SCOV_TH and row.identity > ID_TH:
+            contains[row.qid].add(row.tid)
+            incoming[row.tid].add(row.qid)
 
     # ---- Build cluster ----
     all_reads = set(read_len)
@@ -227,38 +242,79 @@ def main():
     )
     bins = [members for _, members in bins_sorted]
 
-    # ---- Select representatives ----
+    # ---- Select center reads ----
     selected_bins = {}
     for bin_id, members in enumerate(bins):
         for r in sorted(members, key=lambda r: (-read_len[r], r)):
-            FAq, FAs, LRA, LA, RA, MA = endpoint_stat(r, aln_by_query)
-            IQR_value = compute_iqr(r, aln_by_query, read_len[r])
+            FAq, FAs, LRA, LA, RA, MA, IQR_value = endpoint_stat_and_iqr(
+                r, aln_by_query, read_len[r]
+            )
 
             if read_len[r] < SHORT_CENTER_LEN and (FAq + FAs) < MIN_SHORT_CENTER_NUM:
                 continue
-
+    
             if pass_center_cond(FAq, FAs, LRA, LA, RA, MA, IQR_value):
                 selected_bins[bin_id] = (r, members)
                 break
 
+
+    # ---- Build FA candidate pool ----
+    center_fa_pool = {}
+    for bin_id, (center, members) in selected_bins.items():
+        fa_reads = set()
+        for _, _, _, qcov, scov, identity, role, mate in aln_by_query[center]:
+            if qcov > FA_COV_TH and scov > FA_COV_TH and identity > ID_TH:
+                fa_reads.add(mate)
+        center_fa_pool[bin_id] = {center} | fa_reads
+
+
+    # ---- Select representative ----
+    rep_seen = {}
+    rep_stat = {}
+
+    for bin_id in sorted(selected_bins):
+        pool = center_fa_pool[bin_id]
+    
+        def rep_key(r):
+            FAq, FAs, LRA, LA, RA, MA, _ = endpoint_stat_and_iqr(
+                r, aln_by_query, read_len[r]
+            )
+            return (-(FAq + FAs), -LRA, r)
+
+        rep = min(pool, key=rep_key)
+
+        if rep not in rep_seen:
+            rep_seen[rep] = bin_id
+
+            FAq, FAs, LRA, LA, RA, MA, IQR_value = endpoint_stat_and_iqr(
+                rep, aln_by_query, read_len[rep]
+            )
+
+            rep_stat[bin_id] = (
+                rep,
+                FAq + FAs,
+                LRA,
+                LA,
+                RA,
+                MA,
+                IQR_value
+            )
+
+
     # ---- Output ----
     try:
         with open(REP_STAT_FILE, "w") as osf:
-            osf.write("ClusterID\trepID\tLength\tFA\tLRA\tLA\tRA\tMA\tIQR\n")
-            for i in sorted(selected_bins):
-                center, members = selected_bins[i]
-                FAq, FAs, LRA, LA, RA, MA = endpoint_stat(center, aln_by_query)
-                IQR_value = compute_iqr(center, aln_by_query, read_len[center])
-                FA = FAq + FAs
+            osf.write("repID\tLength\tFA\tLRA\tLA\tRA\tMA\tIQR\n")
+            for bin_id in sorted(rep_stat):
+                rep, FA, LRA, LA, RA, MA, IQR_value = rep_stat[bin_id]
                 osf.write(
-                    f"{i}\t{center}\t{read_len[center]}\t{FA}\t{LRA}\t{LA}\t{RA}\t{MA}\t{IQR_value:.4f}\n"
+                    f"{rep}\t{read_len[rep]}\t{FA}\t{LRA}\t{LA}\t{RA}\t{MA}\t{IQR_value:.4f}\n"
                 )
     except IOError as e:
         sys.exit(f"[ERROR] Cannot write output file: {e}")
 
-    if not selected_bins:
+    if not rep_stat:
         print("[WARNING] No representative reads selected. Check alignment quality or thresholds.")
-
 
 if __name__ == "__main__":
     main()

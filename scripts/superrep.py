@@ -235,7 +235,7 @@ for r in sorted(kept_reps, key=lambda x: (rep_len[x], x)):
 # =============================
 with open(OUT_SUPERREP, "w") as out_super:
     out_super.write(
-        "ComponentID\tComponentSize\tSuperRep\tLength\tFA\tLRA\tAvgIdentity\tIQR\tConnectNum\n"
+        "ComponentID\tComponentSize\tFinalRep\tLength\tFA\tLRA\tAvgIdentity\tIQR\tConnectNum\n"
     )
 
     for cid, comp in enumerate(components):

@@ -12,7 +12,7 @@ collapse_reads:
   QCOV_TH: 0
   SCOV_TH: 0.99
   ID_TH: 0.8
-  DELTA: 60
+  DELTA: 50
   FA_COV_TH: 0.99
   MA_TH: 0
   MA_DELTA: 1000

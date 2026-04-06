@@ -80,7 +80,7 @@ collapse_reads:
   # Endpoint classification tolerance (bp).
   # An alignment is classified as LA or RA if its start / end position is
   # within DELTA bp of the read ends.
-  DELTA: 60
+  DELTA: 50
 
   # Full-alignment (FA) detection threshold.
   # An alignment is counted as FA when both query coverage > FA_COV_TH and

@@ -240,7 +240,7 @@ python3 "$SCRIPT_DIR/center_filter.py" \
     ${ID_TH:+--idth $ID_TH}
 
 # -----------------------------
-awk 'NR>1 {print $2}' "$REP_STAT" | \
+awk 'NR>1 {print $1}' "$REP_STAT" | \
 seqkit grep -i -f - "$INPUT_FA" -o "$REP_FA"
 
 # -----------------------------
