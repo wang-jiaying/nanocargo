@@ -11,7 +11,7 @@ usage() {
 ############################################
 help() {
     echo "Usage:"
-    echo "  nanocargo_repseq -i <input.fa> -o <output_dir> [-t threads] [-paf file.paf] [-s coverage]"
+    echo "  nanocargo_repseq -i <input.fa> -o <output_dir> [-t threads] [-s coverage]"
     echo "                   [-m id_cluster] [-n min_internal] [-d distance] [-p id_merge]"
     echo ""
     echo "Required arguments:"
@@ -20,8 +20,8 @@ help() {
     echo ""
     echo "Optional arguments:"
     echo "  -t INT       Number of threads (default: 16)"
-    echo "  -paf         Input all-vs-all alignment in PAF format (ava-ont)"
-    echo "               If provided, the all-vs-all alignment of the input FASTA will be skipped"
+    echo "  -M STR       Basecalling mode of input data: 'sup' (super-accuracy) or 'fast'"
+    echo "               Selects the corresponding parameter preset (default: sup)"
     echo ""
     echo "Read filtering parameters:"
     echo "  -s FLOAT     Minimum coverage fraction to determine containment"
@@ -42,18 +42,17 @@ help() {
     echo ""
     exit 0
 }
- 
 
 # -----------------------------
 # Default parameters
 # -----------------------------
 THREADS=16
-INPUT_PAF=""
 SCOV_TH=""
 MA_TH=""
 MA_DELTA=""
 ID_TH=""
 ID_TH2=""
+MODE=""          # 新增
 
 # -----------------------------
 
@@ -61,13 +60,11 @@ if [[ $# -eq 0 ]]; then
     usage
 fi
 
-
 # Parse arguments
 # -----------------------------
 while [[ $# -gt 0 ]]; do
     case $1 in
         -i) INPUT_FA="$2"; shift 2 ;;
-        -paf) INPUT_PAF="$2"; shift 2 ;;
         -o) OUTDIR="$2"; shift 2 ;;
         -t) THREADS="$2"; shift 2 ;;
         -s) SCOV_TH="$2"; shift 2 ;;
@@ -75,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         -d) MA_DELTA="$2"; shift 2 ;;
         -m) ID_TH="$2"; shift 2 ;;
         -p) ID_TH2="$2"; shift 2 ;;
+        -M) MODE="$2"; shift 2 ;;
         -h|--help) help ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -101,7 +99,20 @@ OUTDIR=$(realpath -m "$OUTDIR")
 mkdir -p "$OUTDIR"
 
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
-CONFIG="$SCRIPT_DIR/config.yaml"
+
+if [[ -n "$MODE" ]]; then
+    if [[ "$MODE" != "sup" && "$MODE" != "fast" ]]; then
+        echo "Error: -M must be 'sup' or 'fast'"
+        exit 1
+    fi
+fi 
+
+if [[ "$MODE" == "fast" ]]; then
+    CONFIG="$SCRIPT_DIR/config_fast.yaml"
+else
+    CONFIG="$SCRIPT_DIR/config.yaml"   # sup 或不传都用默认
+fi
+
 
 if [[ ! -f "$CONFIG" ]]; then
     echo "Error: config file not found: $CONFIG"
@@ -124,32 +135,43 @@ for cmd in minimap2 seqkit python3 awk sort; do
 done
 
 # -----------------------------
+# Create temp directory, auto-cleanup on exit
+# -----------------------------
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+echo "Temp directory: $TMPDIR"
+
+# -----------------------------
 # Define outputs
 # -----------------------------
-FILTERED_PAF="$OUTDIR/alignment_filtered.paf"
+# Final outputs (kept)
 REP_STAT="$OUTDIR/Initial_rep_stat.txt"
 REP_FA="$OUTDIR/initial_rep.fa"
 REP1_FA="$OUTDIR/filtered_rep.fa"
 FINALREP_STAT="$OUTDIR/Finalrep_summary.txt"
 REP2_FA="$OUTDIR/finalrep.fa"
 
-# -----------------------------
-if [[ -n "$INPUT_PAF" ]]; then
-    INPUT_PAF=$(realpath "$INPUT_PAF")
-    if [[ ! -f "$INPUT_PAF" ]]; then
-        echo "Error: input PAF file not found: $INPUT_PAF"
-        usage
-        exit 1
-    fi
-    echo "Using provided PAF file: $INPUT_PAF"
-fi
+# Temporary intermediate files (auto-deleted)
+SUBSET_FA="$TMPDIR/subset1.fa"
+SUBSET_CT_TXT="$TMPDIR/subset1_CT.txt"
+SUBSET_CT_FA="$TMPDIR/subset1_CT.fa"
+SUBSET_CT_REPSTAT="$TMPDIR/subset1_CTrep_stat.txt"
+MAPTOCT_PAF="$TMPDIR/map_to_CT.paf"
+MAPTOCT_FILTERED_PAF="$TMPDIR/map_to_CT_filtered.paf"
+MAPTOCT_IDS="$TMPDIR/map_to_CT_ids.txt"
+REMAINING_FA="$TMPDIR/remaining_reads.fa"
+FILTERED_PAF_R1="$TMPDIR/alignment_filtered_round1.paf"
+FILTERED_PAF_R2="$TMPDIR/alignment_filtered_round2.paf"
+PRE_REP_STAT_R1="$TMPDIR/pre_rep_stat_round1.txt"
+PRE_REP_STAT_R2="$TMPDIR/pre_rep_stat_round2.txt"
 
 # -----------------------------
-echo "========== Step 1: Filter alignments =========="
-
+# Load config parameters
+# -----------------------------
 eval $(python3 - <<END
 import yaml
 cfg = yaml.safe_load(open("$CONFIG"))
+
 params = cfg.get('alignment_filter', {})
 print(f"ALEN_LOW={params.get('ALEN_RATIO_LOW', 0.93)}")
 print(f"ALEN_HIGH={params.get('ALEN_RATIO_HIGH', 1.07)}")
@@ -158,6 +180,14 @@ print(f"ID_SHORT={params.get('ID_SHORT', 0.9)}")
 print(f"SCOV_LONG={params.get('SCOV_LONG', 0.99)}")
 print(f"SCOV_SHORT={params.get('SCOV_SHORT', 0.99)}")
 print(f"SHORT_LEN={params.get('SHORT_LEN', 4000)}")
+
+ct = cfg.get('ct_mapping', {})
+print(f"CT_ALEN_LOW={ct.get('ALEN_RATIO_LOW', 0.95)}")
+print(f"CT_ALEN_HIGH={ct.get('ALEN_RATIO_HIGH', 1.05)}")
+print(f"CT_MIN_ID={ct.get('MIN_IDENTITY', 0.85)}")
+print(f"CT_MIN_QCOV={ct.get('MIN_QCOV', 0.98)}")
+print(f"CT_MIN_SCOV={ct.get('MIN_SCOV', 0.98)}")
+print(f"CT_FACOUNT={ct.get('FACOUNT', 60)}")
 END
 )
 
@@ -196,48 +226,114 @@ AWK_FILTER='
 }
 '
 
-if [[ -n "$INPUT_PAF" ]]; then
-    echo "Input is a PAF file, skipping minimap2 alignment."
-    LC_ALL=C awk -v ALEN_LOW="$ALEN_LOW" \
-                 -v ALEN_HIGH="$ALEN_HIGH" \
-                 -v ID_LONG="$ID_LONG" \
-                 -v ID_SHORT="$ID_SHORT" \
-                 -v SCOV_LONG="$SCOV_LONG" \
-                 -v SCOV_SHORT="$SCOV_SHORT" \
-                 -v SHORT_LEN="$SHORT_LEN" \
-                 "$AWK_FILTER" "$INPUT_PAF" > "$FILTERED_PAF"
-else
-    echo "Input is a FASTA file, running minimap2 for self-alignment..."
-    minimap2 -x ava-ont -t "$THREADS" -m 200 "$INPUT_FA" "$INPUT_FA" | \
-    LC_ALL=C awk -v ALEN_LOW="$ALEN_LOW" \
-                 -v ALEN_HIGH="$ALEN_HIGH" \
-                 -v ID_LONG="$ID_LONG" \
-                 -v ID_SHORT="$ID_SHORT" \
-                 -v SCOV_LONG="$SCOV_LONG" \
-                 -v SCOV_SHORT="$SCOV_SHORT" \
-                 -v SHORT_LEN="$SHORT_LEN" \
-                 "$AWK_FILTER" > "$FILTERED_PAF"
-fi
-
 # -----------------------------
-echo "========== Step 2: Cluster reads + Filter center=========="
-MIN_READLEN=$(awk 'BEGIN{min=0} /^>/ {if(seq_len>0 && (seq_len<min || min==0)) min=seq_len; seq_len=0; next} {seq_len+=length($0)} END{if(seq_len>0 && (seq_len<min || min==0)) min=seq_len; print min}' "$INPUT_FA")
-echo "Minimum read length: $MIN_READLEN"
+echo "========== Step 1+2 (Round 1): Subset → align → cluster =========="
 
-if [[ -z "$MIN_READLEN" ]]; then
-    echo "Error: failed to detect MIN_READLEN"
-    exit 1
-fi
+# minimap2 ava-ont needs to read the file twice, must write to disk
+seqkit sample -n 3000 "$INPUT_FA" -o "$SUBSET_FA"
 
+minimap2 -x ava-ont -t "$THREADS" -m 200 "$SUBSET_FA" "$SUBSET_FA" | \
+LC_ALL=C awk -v ALEN_LOW="$ALEN_LOW" -v ALEN_HIGH="$ALEN_HIGH" \
+             -v ID_LONG="$ID_LONG" -v ID_SHORT="$ID_SHORT" \
+             -v SCOV_LONG="$SCOV_LONG" -v SCOV_SHORT="$SCOV_SHORT" \
+             -v SHORT_LEN="$SHORT_LEN" \
+             "$AWK_FILTER" > "$FILTERED_PAF_R1"
+
+MIN_READLEN=$(awk 'BEGIN{min=0} /^>/ {if(seq_len>0 && (seq_len<min || min==0)) min=seq_len; seq_len=0; next} \
+    {seq_len+=length($0)} END{if(seq_len>0 && (seq_len<min || min==0)) min=seq_len; print min}' "$SUBSET_FA")
+echo "Min read length (Round1 subset): $MIN_READLEN"
+
+# center_filter.py outputs pre_rep_stat.txt into --outdir; use TMPDIR to keep it separate
 python3 "$SCRIPT_DIR/center_filter.py" \
     --config "$CONFIG" \
-    --paf "$FILTERED_PAF" \
-    --outdir "$OUTDIR" \
+    --paf "$FILTERED_PAF_R1" \
+    --outdir "$TMPDIR" \
     --minlen "$MIN_READLEN" \
     ${SCOV_TH:+--scov $SCOV_TH} \
     ${MA_TH:+--ma $MA_TH} \
     ${MA_DELTA:+--madelta $MA_DELTA} \
     ${ID_TH:+--idth $ID_TH}
+
+cp "$TMPDIR/pre_rep_stat.txt" "$PRE_REP_STAT_R1"
+
+# Extract abundant amplicons (FA column = $3, index from center_filter.py output)
+awk -v fa_th="$CT_FACOUNT" \
+    'NR==1 {next} $3 > fa_th {print $1 > "'"$SUBSET_CT_TXT"'"; print >> "'"$SUBSET_CT_REPSTAT"'"}' \
+    "$PRE_REP_STAT_R1"
+
+if [[ ! -s "$SUBSET_CT_TXT" ]]; then
+    echo "[WARNING] No abundant amplicons (FA > $CT_FACOUNT) found in Round1."
+    echo "[WARNING] Skipping CT extraction; using full input for Round2."
+    cp "$INPUT_FA" "$REMAINING_FA"
+else
+    seqkit grep -i -f "$SUBSET_CT_TXT" "$INPUT_FA" -o "$SUBSET_CT_FA"
+    echo "Abundant amplicons stats:"
+    seqkit stats "$SUBSET_CT_FA"
+
+    # Map all reads against abundant amplicons to find matching reads
+    minimap2 -x map-ont --secondary=no -t "$THREADS" "$SUBSET_CT_FA" "$INPUT_FA" \
+        > "$MAPTOCT_PAF"
+
+    awk -v ALEN_LOW="$CT_ALEN_LOW" \
+        -v ALEN_HIGH="$CT_ALEN_HIGH" \
+        -v MIN_ID="$CT_MIN_ID" \
+        -v MIN_QCOV="$CT_MIN_QCOV" \
+        -v MIN_SCOV="$CT_MIN_SCOV" \
+        '
+        $1 != $6 {
+            identity = $10/$11
+            qcov     = ($4-$3)/$2
+            scov     = ($9-$8)/$7
+            if ( ($9-$8)/$11 > ALEN_LOW && ($9-$8)/$11 < ALEN_HIGH &&
+                 ($4-$3)/$11 > ALEN_LOW && ($4-$3)/$11 < ALEN_HIGH &&
+                 identity > MIN_ID && qcov > MIN_QCOV && scov > MIN_SCOV ) {
+                print
+            }
+        }' "$MAPTOCT_PAF" > "$MAPTOCT_FILTERED_PAF"
+
+    awk '{print $1; print $6}' "$MAPTOCT_FILTERED_PAF" | sort -u > "$MAPTOCT_IDS"
+    seqkit grep -v -f "$MAPTOCT_IDS" "$INPUT_FA" -o "$REMAINING_FA"
+    echo "Remaining reads after removing abundant amplicons:"
+    seqkit stats "$REMAINING_FA"
+fi
+
+# -----------------------------
+echo "========== Step 1+2 (Round 2): Remaining reads → align → cluster =========="
+
+minimap2 -x ava-ont -t "$THREADS" -m 200 "$REMAINING_FA" "$REMAINING_FA" | \
+LC_ALL=C awk -v ALEN_LOW="$ALEN_LOW" -v ALEN_HIGH="$ALEN_HIGH" \
+             -v ID_LONG="$ID_LONG" -v ID_SHORT="$ID_SHORT" \
+             -v SCOV_LONG="$SCOV_LONG" -v SCOV_SHORT="$SCOV_SHORT" \
+             -v SHORT_LEN="$SHORT_LEN" \
+             "$AWK_FILTER" > "$FILTERED_PAF_R2"
+
+MIN_READLEN=$(awk 'BEGIN{min=0} /^>/ {if(seq_len>0 && (seq_len<min || min==0)) min=seq_len; seq_len=0; next} \
+    {seq_len+=length($0)} END{if(seq_len>0 && (seq_len<min || min==0)) min=seq_len; print min}' "$REMAINING_FA")
+echo "Min read length (Round2 remaining): $MIN_READLEN"
+
+python3 "$SCRIPT_DIR/center_filter.py" \
+    --config "$CONFIG" \
+    --paf "$FILTERED_PAF_R2" \
+    --outdir "$TMPDIR" \
+    --minlen "$MIN_READLEN" \
+    ${SCOV_TH:+--scov $SCOV_TH} \
+    ${MA_TH:+--ma $MA_TH} \
+    ${MA_DELTA:+--madelta $MA_DELTA} \
+    ${ID_TH:+--idth $ID_TH}
+
+cp "$TMPDIR/pre_rep_stat.txt" "$PRE_REP_STAT_R2"
+
+# -----------------------------
+echo "========== Merge Round1 + Round2 =========="
+
+# Merge Initial_rep_stat.txt: header + Round1 CT rows + Round2 all rows
+{
+    head -n 1 "$PRE_REP_STAT_R2"
+    [[ -s "$SUBSET_CT_REPSTAT" ]] && cat "$SUBSET_CT_REPSTAT"
+    tail -n +2 "$PRE_REP_STAT_R2"
+} > "$REP_STAT"
+
+
 
 # -----------------------------
 awk 'NR>1 {print $1}' "$REP_STAT" | \
@@ -265,3 +361,4 @@ seqkit grep -i -f - "$REP1_FA" -o "$REP2_FA"
 
 echo "========== Pipeline finished =========="
 echo "Final representative sequences: $REP2_FA"
+# TMPDIR is automatically removed by trap on exit

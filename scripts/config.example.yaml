@@ -4,8 +4,9 @@
 # Copy this file to config.yaml and adjust parameters as needed.
 #
 # Module-to-script mapping:
-#   alignment_filter  ->  nanocargo_repseq.sh (inline awk filter)
+#   alignment_filter  ->  nanocargo_repseq (inline awk filter)
 #   collapse_reads    ->  center_filter.py
+#   ct_mapping        ->  nanocargo_repseq (inline awk filter)
 #   self_ligation     ->  IIRcheck.py
 #   rep_superbin      ->  superrep.py
 #   racon_polish      ->  (Racon polishing step)
@@ -139,7 +140,38 @@ collapse_reads:
   # falls in the intermediate zone [IQR_TH1, IQR_TH2].
   LRA_MIN: 3
 
+# -----------------------------------------------------------------------------
+# [Step 2b]  ct_mapping
+# Filters alignments when mapping all reads against abundant amplicon
+# representatives (CT reads) identified from subset data in Round 1. 
+# Used to separate reads belonging to abundant amplicons from remaining 
+# reads before Round 2 representatives identification.
+# -----------------------------------------------------------------------------
+ct_mapping:
 
+  # Lower bound on the ratio of aligned span to alignment length,
+  # applied to both query and target.
+  ALEN_RATIO_LOW: 0.95
+
+  # Upper bound on the ratio of aligned span to alignment length.
+  ALEN_RATIO_HIGH: 1.05
+
+  # Minimum alignment idventity (matches / alignment_length) required for a
+  # read to be assigned to a CT representative.
+  MIN_IDENTITY: 0.85
+
+  # Minimum query coverage (query span / query length) required for assignment.
+  MIN_QCOV: 0.98
+
+  # Minimum subject coverage (subject span / subject length) required for
+  # assignment.
+  MIN_SCOV: 0.98
+
+  # Minimum number of full-alignment (FA) counts a representative must have in
+  # Round 1 representatibe identification to be treated as an abundant amplicon.
+  # Representatives below this threshold are not used as abundant CT representatives
+  # and their corresponding reads proceed to Round 2 representatibe identification.
+  FACOUNT: 60
 # -----------------------------------------------------------------------------
 # [Step 3]  self_ligation
 # Detects self-ligation artifacts in representative reads. Detection is based on 

@@ -1,26 +1,25 @@
 alignment_filter:
   ALEN_RATIO_LOW: 0.93
   ALEN_RATIO_HIGH: 1.07
-  ID_LONG: 0.8
-  ID_SHORT: 0.9
-  SCOV_LONG: 0.99
-  SCOV_SHORT: 0.99
+  ID_LONG: 0.5
+  ID_SHORT: 0.5
+  SCOV_LONG: 0.97
+  SCOV_SHORT: 0.97
   SHORT_LEN: 4000
 
 ct_mapping:
   ALEN_RATIO_LOW: 0.95
   ALEN_RATIO_HIGH: 1.05
-  MIN_IDENTITY: 0.85
+  MIN_IDENTITY: 0.6
   MIN_QCOV: 0.98
   MIN_SCOV: 0.98
   FACOUNT: 60
   
-  
 collapse_reads:
   QCOV_TH: 0
   SCOV_TH: 0.99
-  ID_TH: 0.8
-  DELTA: 50
+  ID_TH: 0.5
+  DELTA: 80
   FA_COV_TH: 0.99
   MA_TH: 0
   MA_DELTA: 1000
@@ -51,22 +50,22 @@ rep_superbin:
   REP_STAT: "Initial_rep_stat.txt"
   OUT_SUPERREP: "Finalrep_summary.txt"
   
-  ID_TH: 0.9
+  ID_TH: 0.6
   SCOV_TH: 0.98
   ALEN_RATIO_LOW: 0.9
   ALEN_RATIO_HIGH: 1.1
   QCOV_MAX: 0.9
   SHORT_LEN: 3000
-  ID_TH_SHORT: 0.9
+  ID_TH_SHORT: 0.6
   SCOV_TH_SHORT: 0.9
   QCOV_MAX_SHORT: 0.7
 
   QCOV_TH: 0.98
   SCOV_TH2: 0.98
-  ID_TH2: 0.8
+  ID_TH2: 0.5
   LEN_RATIO_LOW: 0.9
   LEN_RATIO_HIGH: 1.1
-  STRONG_ID_TH: 0.9
+  STRONG_ID_TH: 0.6
   STRONG_SCOV_TH: 0.99
   STRONG_QCOV_TH: 0.95
   
@@ -74,8 +73,8 @@ racon_polish:
   aln_ratio_low: 0.93
   aln_ratio_high: 1.07 
   min_len_long: 4000 
-  min_identity_long: 0.75
+  min_identity_long: 0.45
   min_qcov_long: 0.98     
-  min_identity_short: 0.9
+  min_identity_short: 0.6
   min_qcov_short: 0.98 
 

@@ -21,6 +21,7 @@ help() {
     echo ""
     echo "Optional arguments:"
     echo "  -t INT              Number of threads (default: 16)"
+    echo "  -M STR              Basecalling mode of data: 'sup' or 'fast' (default: sup)"
     echo "  -r INT              Number of Racon polishing rounds (default: 3)"
     echo "  -m MODEL            Medaka model. Medaka polishing runs only if a model is provided (default: none)"
     echo "  --keep-intermediate Keep intermediate files generated during polishing (default: false)"
@@ -34,6 +35,7 @@ help() {
 # Default parameters
 # -----------------------------
 THREADS=16
+MODE=""
 ROUNDS=3
 MEDAKA_MODEL=""
 KEEP_INTERMEDIATE=false
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         -f) READS_FASTQ="$2"; shift 2 ;;
         -o) OUTDIR="$2"; shift 2 ;;
         -t) THREADS="$2"; shift 2 ;;
+        -M) MODE="$2"; shift 2 ;;
         -r) ROUNDS="$2"; shift 2 ;;
         -m) MEDAKA_MODEL="$2"; shift 2 ;;
         --keep-intermediate) KEEP_INTERMEDIATE=true; shift ;;
@@ -82,7 +85,18 @@ if [[ -d "$OUTDIR" && "$(ls -A "$OUTDIR")" ]]; then
 fi
 mkdir -p "$OUTDIR"
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
-CONFIG="$SCRIPT_DIR/config.yaml"
+
+if [[ -n "$MODE" && "$MODE" != "sup" && "$MODE" != "fast" ]]; then
+    echo "Error: -M must be 'sup' or 'fast'"
+    exit 1
+fi
+
+if [[ "$MODE" == "fast" ]]; then
+    CONFIG="$SCRIPT_DIR/config_fast.yaml"
+else
+    CONFIG="$SCRIPT_DIR/config.yaml"
+fi
+
 
 if [[ ! -f "$CONFIG" ]]; then
     echo "Error: config file not found: $CONFIG"

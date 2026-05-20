@@ -28,7 +28,7 @@ args = parser.parse_args()
 outdir = os.path.abspath(args.outdir)
 os.makedirs(outdir, exist_ok=True)
 
-REP_STAT_FILE = os.path.join(outdir, "Initial_rep_stat.txt")
+REP_STAT_FILE = os.path.join(outdir, "pre_rep_stat.txt")
 
 # -------------------------
 # Load config
@@ -186,23 +186,40 @@ def main():
 
     # -------------------------
     try:
-        df = pd.read_csv(
+        raw = pd.read_csv(
             args.paf,
             sep="\t",
             header=None,
-            usecols=[0, 1, 2, 3, 5, 6, 7, 8, 9, 10],
-            names=["qid", "qlen", "qs", "qe", "tid", "tlen", "ts", "te", "matches", "alen"],
+            usecols=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            names=["qid", "qlen", "qs", "qe", "strand",
+                   "tid", "tlen", "ts", "te", "matches", "alen"],
             dtype={
-                "qid": str, "qlen": int, "qs": int, "qe": int,
+                "qid": str, "qlen": int, "qs": int, "qe": int, "strand": str,
                 "tid": str, "tlen": int, "ts": int, "te": int,
                 "matches": int, "alen": int
             }
         )
     except Exception as e:
         sys.exit(f"[ERROR] Failed to read PAF file: {e}")
-
-    if df.empty:
+ 
+    if raw.empty:
         sys.exit("[ERROR] No alignments loaded from PAF file. The file may be empty or malformed.")
+ 
+    # Apply swap in-place using boolean mask
+    swap_mask = raw["qlen"] < raw["tlen"]
+    if swap_mask.any():
+        orig = raw[swap_mask].copy()
+        raw.loc[swap_mask, "qid"]  = orig["tid"].values
+        raw.loc[swap_mask, "qlen"] = orig["tlen"].values
+        raw.loc[swap_mask, "qs"]   = orig["ts"].values
+        raw.loc[swap_mask, "qe"]   = orig["te"].values
+        raw.loc[swap_mask, "tid"]  = orig["qid"].values
+        raw.loc[swap_mask, "tlen"] = orig["qlen"].values
+        raw.loc[swap_mask, "ts"]   = orig["qs"].values
+        raw.loc[swap_mask, "te"]   = orig["qe"].values
+        # matches, alen, strand are symmetric — no swap needed
+ 
+    df = raw.drop(columns=["strand"])
 
     df["identity"] = df["matches"] / df["alen"]
     df["qcov"]     = (df["qe"] - df["qs"]) / df["qlen"]
@@ -282,6 +299,12 @@ def main():
             return (-(FAq + FAs), -LRA, r)
 
         rep = min(pool, key=rep_key)
+
+        FAq, FAs, LRA, LA, RA, MA, IQR_value = endpoint_stat_and_iqr(
+            rep, aln_by_query, read_len[rep]
+        )
+        if MA > MA_TH:
+            continue  
 
         if rep not in rep_seen:
             rep_seen[rep] = bin_id

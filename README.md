@@ -160,7 +160,67 @@ nanocargo_tag_filter -i <input_reads> -o <outdir> -s <start_tag.fa> -e <end_tag.
 | `-x INT` | 400 | Maximum allowed distance (bp) between the tag and the read end |
 
 ---
-
+ 
+### Preparing tag sequence files
+ 
+Tag sequences define the expected boundaries of the amplicon and are used to
+verify that reads span the full amplicon region. They correspond to the IS (or
+other MGE) sequences flanking the accessory region of interest.
+ 
+**General rule:**
+Both `-s` (start tag) and `-e` (end tag) sequences must be provided in
+**5'→3' orientation**, exactly as they appear in the amplicon read.
+ 
+| Tag | Position in amplicon | Sequence to provide |
+|---|---|---|
+| Start tag (`-s`) | 5' end of amplicon | IS/MGE sequence at the 5' boundary of the accessory region, in 5'→3' direction |
+| End tag (`-e`) | 3' end of amplicon | IS/MGE sequence at the 3' boundary of the accessory region, in 5'→3' direction (reverse complement if necessary — see below) |
+ 
+---
+ 
+#### Example: IS1071 composite transposon (IS1071-CT)
+ 
+IS1071-CT consists of two IS1071 copies in inverted orientation flanking an
+accessory region. Outward-facing primers bind within IS1071 and amplify the
+accessory region between them. The resulting amplicon is flanked on both sides
+by IS1071-derived sequence:
+ 
+```
+5'──[IS1071 →]──────────────────────[← IS1071]──3'
+      ↑                                    ↑
+   start tag                            end tag
+ (5'→3' as-is)            (5'→3' = RC of the minus-strand IS1071)
+ primer →                                ← primer
+```
+ 
+- **`starttag_IS1071.fasta`** — IS1071 sequence from the primer binding site to
+  the start of the accessory region, in 5'→3' orientation
+- **`endtag_IS1071.fasta`** — IS1071 sequence at the 3' end of the amplicon,
+  written in 5'→3' orientation as it appears in the read (i.e. reverse
+  complement of the reference IS1071 sequence on the bottom strand)
+> **Important:** The end tag must be given in 5'→3' orientation **as it
+> appears in the amplicon read** — not as it appears in the IS reference on the
+> complementary strand. If the 3'-end IS copy is on the minus strand of your
+> reference, take its reverse complement before providing it to `-e`.
+ 
+---
+ 
+#### For other IS elements or MGEs
+ 
+The same logic applies to any composite transposon or MGE pair. To prepare your
+tag files:
+ 
+1. Identify the two IS/MGE copies flanking your accessory region of interest.
+2. Locate the outward-facing primer binding sites within each IS/MGE copy.
+3. Extract the IS/MGE sequence between the primer binding site and the
+   IS/accessory junction (this is the sequence that will flank every amplicon
+   read).
+4. **Start tag (`-s`):** use this sequence directly in 5'→3' orientation.
+5. **End tag (`-e`):** provide the sequence in 5'→3' orientation **as it appears
+   in the amplicon read**. If the 3'-flanking IS copy is on the reverse strand
+   of your reference, take the reverse complement of the extracted sequence
+   before saving it to the FASTA file.
+ 
 ### `nanocargo_repseq` — Core module
 
 Identifies representative sequences from tagged reads using a containment-based
@@ -183,7 +243,7 @@ nanocargo_repseq -i <input.fa> -o <output_dir> [options]
 |---|---|---|
 | `-h` | — | Show help message |
 | `-t INT` | 16 | Number of threads |
-| `-paf` | — | Input all-vs-all alignment in PAF format (ava-ont). If provided, the all-vs-all alignment step will be skipped |
+| `-M STR` | sup | Basecalling mode: `sup` (super-accuracy) or `fast`. Selects the corresponding parameter preset |
 
 **Read filtering parameters:**
 
@@ -217,6 +277,7 @@ nanocargo_polish -i <input.fa> -f <reads.fastq> -o <output_dir> [options]
 | `-f` | — | Input FASTQ file for Racon and optional Medaka polishing |
 | `-o` | — | Output directory |
 | `-t INT` | 16 | Number of threads |
+| `-M STR` | sup | Basecalling mode: `sup` (super-accuracy) or `fast`. Selects the corresponding parameter preset |
 | `-r INT` | 3 | Number of Racon polishing rounds |
 | `-m MODEL` | none | Medaka model. Medaka polishing runs only if a model is provided |
 | `--keep-intermediate` | false | Keep intermediate files generated during polishing |
@@ -251,10 +312,15 @@ nanocargo_pipeline -d <directory>      -o <output_dir> -s <start_tag.fa> -e <end
 
 ## Configuration
 
-The default parameters were optimized for Oxford Nanopore data basecalled with 
-`dna_r10.4.1_e8.2_400bps_sup@v4.3.0` and may need adjustment for other 
-basecalling models or dataset characteristics. If you need to tune the pipeline,
-copy the annotated template to `config.yaml` and edit the values:
+Two built-in parameter presets are provided for common basecalling modes:
+
+| Mode | Flag | Config file | Recommended for |
+|---|---|---|---|
+| Super-accuracy (default) | `-M sup` or omit `-M` | `config.yaml` | Data basecalled with `sup` models |
+| Fast | `-M fast` | `config_fast.yaml` | Data basecalled with `fast` or `hac` models |
+
+If you need to further customize parameters beyond the presets, copy the
+annotated template and edit directly:
 
 ```bash
 cp /path/to/nanocargo/scripts/config.example.yaml /path/to/nanocargo/scripts/config.yaml
