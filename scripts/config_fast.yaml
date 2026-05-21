@@ -3,16 +3,16 @@ alignment_filter:
   ALEN_RATIO_HIGH: 1.07
   ID_LONG: 0.5
   ID_SHORT: 0.5
-  SCOV_LONG: 0.97
-  SCOV_SHORT: 0.97
+  SCOV_LONG: 0.98
+  SCOV_SHORT: 0.98
   SHORT_LEN: 4000
 
 ct_mapping:
   ALEN_RATIO_LOW: 0.95
   ALEN_RATIO_HIGH: 1.05
   MIN_IDENTITY: 0.6
-  MIN_QCOV: 0.98
-  MIN_SCOV: 0.98
+  MIN_QCOV: 0.97
+  MIN_SCOV: 0.97
   FACOUNT: 60
   
 collapse_reads:
