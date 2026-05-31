@@ -116,7 +116,12 @@ collapse_reads:
   # Minimum number of LA alignments and RA alignments each required for a
   # candidate center to pass.
   MIN_LA_RA: 5
-
+  
+  # Maximum query coverage allowed for an alignment to be counted as LA or RA.
+  # Alignments with qcov >= LRA_QCOV_TH are excluded from LA/RA counting,
+  # LRA pairing, and IQR calculation.
+  LRA_QCOV_TH: 0.9
+  
   # --- IQR consistency filtering ---
   # The IQR (interquartile range) of LA / RA endpoint positions measures how
   # consistently reads align to the candidate center. 

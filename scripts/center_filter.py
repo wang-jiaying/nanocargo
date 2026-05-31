@@ -40,6 +40,7 @@ QCOV_TH = cfg.get("QCOV_TH", 0)
 SCOV_TH = cfg.get("SCOV_TH", 0.99)
 ID_TH = cfg.get("ID_TH", 0.8)
 DELTA = cfg.get("DELTA", 50)
+LRA_QCOV_TH = cfg.get("LRA_QCOV_TH", 0.9)
 FA_COV_TH = cfg.get("FA_COV_TH", 0.99)
 MA_TH = cfg.get("MA_TH", 0)
 MA_DELTA = cfg.get("MA_DELTA", 1000)
@@ -115,12 +116,12 @@ def endpoint_stat_and_iqr(read, aln_by_query, qlen):
 
         at = classify_endpoint(qs, qe, rqlen)
 
-        if at == "LA":
+        if at == "LA" and qcov < LRA_QCOV_TH:
             LA += 1
             if identity > ID_TH:
                 LA_qcov.append(qcov)
                 pos.append(qe)   
-        elif at == "RA":
+        elif at == "RA" and qcov < LRA_QCOV_TH:
             RA += 1
             if identity > ID_TH:
                 RA_qcov.append(qcov)
